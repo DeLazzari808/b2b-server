@@ -82,11 +82,14 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: { 
     origin: '*', 
-    methods: ['GET', 'POST'],
+    methods: ['GET', 'POST', 'OPTIONS'],
     credentials: true,
+    allowedHeaders: ['*'],
   },
   transports: ['polling', 'websocket'], // Suporta polling e websocket
   allowEIO3: true, // Compatibilidade com versões antigas
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 // --- Rotas HTTP ---
