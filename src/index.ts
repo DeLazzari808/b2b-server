@@ -80,7 +80,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: { 
+    origin: '*', 
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  transports: ['polling', 'websocket'], // Suporta polling e websocket
+  allowEIO3: true, // Compatibilidade com versões antigas
 });
 
 // --- Rotas HTTP ---
