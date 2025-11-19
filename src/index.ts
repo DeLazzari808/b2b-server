@@ -70,6 +70,9 @@ interface Lobby {
 // --- Armazenamento em Memória ---
 const lobbies: Record<string, Lobby> = {};
 
+// Timers de avanço automático por lobby
+const lobbyAdvanceTimers = new Map<string, NodeJS.Timeout>();
+
 // --- Configuração do Servidor ---
 const app = express();
 app.use(cors());
@@ -230,6 +233,110 @@ app.post('/auth/refresh', async (req, res) => {
   }
 });
 
+// --- Função para agendar avanço automático de música ---
+function scheduleTrackAdvance(lobbyId: string, track: Track) {
+  // Cancela timer anterior se existir
+  const existingTimer = lobbyAdvanceTimers.get(lobbyId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    console.log('🔄 Cancelando timer anterior para lobby:', lobbyId);
+    lobbyAdvanceTimers.delete(lobbyId);
+  }
+  
+  // Garante que a música tem duração
+  if (!track.duration || track.duration <= 0) {
+    console.warn('⚠️ Música sem duração, usando estimativa de 4 minutos');
+    track.duration = 240; // 4 minutos padrão
+  }
+  
+  // Garante que a música tem startTime
+  if (!track.startTime) {
+    console.warn('⚠️ Música sem startTime, definindo agora');
+    track.startTime = Date.now();
+  }
+  
+  const durationMs = track.duration * 1000;
+  const elapsed = Date.now() - track.startTime;
+  const remaining = Math.max(0, durationMs - elapsed);
+  
+  console.log(`⏱️ Agendando avanço automático para lobby ${lobbyId}`);
+  console.log(`   - Música: ${track.title}`);
+  console.log(`   - Duração: ${track.duration}s`);
+  console.log(`   - StartTime: ${new Date(track.startTime).toISOString()}`);
+  console.log(`   - Tempo decorrido: ${Math.floor(elapsed/1000)}s`);
+  console.log(`   - Tempo restante: ${Math.floor(remaining/1000)}s`);
+  
+  if (remaining <= 0) {
+    console.warn('⚠️ Tempo restante é 0 ou negativo, avançando imediatamente');
+    advanceToNextTrack(lobbyId);
+    return;
+  }
+  
+  const timer = setTimeout(() => {
+    console.log(`⏹️ Timer automático: Música terminou no lobby ${lobbyId}`);
+    console.log(`   - Música que terminou: ${track.title}`);
+    advanceToNextTrack(lobbyId);
+    lobbyAdvanceTimers.delete(lobbyId);
+  }, remaining);
+  
+  lobbyAdvanceTimers.set(lobbyId, timer);
+  console.log(`✅ Timer criado e armazenado para lobby ${lobbyId}`);
+}
+
+// --- Função para avançar para próxima música ---
+function advanceToNextTrack(lobbyId: string) {
+  const lobby = lobbies[lobbyId];
+  if (!lobby) {
+    console.warn('⚠️ Lobby não encontrado para avanço:', lobbyId);
+    return;
+  }
+  
+  // Verifica se já está processando (lock)
+  if (lobbyProcessingLocks.get(lobbyId)) {
+    console.log('⚠️ Já está processando avanço para este lobby, ignorando');
+    return;
+  }
+  
+  // Se não há músicas na fila, não faz nada
+  if (lobby.queue.length === 0) {
+    console.log('⚠️ Fila vazia, nada para avançar');
+    return;
+  }
+  
+  // Ativa o lock
+  lobbyProcessingLocks.set(lobbyId, true);
+  
+  try {
+    // Remove a primeira música da fila
+    const trackRemovido = lobby.queue[0];
+    lobby.queue = lobby.queue.slice(1);
+    console.log('✅ Música terminou e foi removida:', trackRemovido.title);
+    console.log('📊 Tamanho da fila agora:', lobby.queue.length);
+    
+    // Se ainda há músicas na fila, define startTime para a próxima e agenda timer
+    if (lobby.queue.length > 0) {
+      lobby.queue[0].startTime = Date.now();
+      console.log('⏰ Próxima música iniciando com startTime:', lobby.queue[0].startTime);
+      console.log('   - Próxima música:', lobby.queue[0].title);
+      
+      // Agenda avanço automático para a próxima música
+      scheduleTrackAdvance(lobbyId, lobby.queue[0]);
+    } else {
+      console.log('📭 Fila vazia após remover música');
+    }
+    
+    // Notifica todos no lobby sobre a atualização da fila
+    io.to(lobbyId).emit('fila_atualizada', lobby.queue);
+    console.log('📤 Enviado evento "fila_atualizada" para o lobby:', lobbyId);
+  } finally {
+    // Remove o lock após um delay
+    setTimeout(() => {
+      lobbyProcessingLocks.delete(lobbyId);
+      console.log('🔓 Lock removido para lobby:', lobbyId);
+    }, 1000);
+  }
+}
+
 // --- Lógica do Socket.IO ---
 // Lock por lobby para evitar processar múltiplos eventos de "música terminou" simultaneamente
 const lobbyProcessingLocks = new Map<string, boolean>();
@@ -335,13 +442,18 @@ io.on('connection', (socket: Socket) => {
       return;
     }
     
-    // Se é a primeira música da fila, adiciona timestamp de início
-    if (lobby.queue.length === 0) {
+    // Adiciona a música à fila primeiro
+    lobby.queue.push(track);
+    
+    // Se é a primeira música da fila, adiciona timestamp de início e inicia timer
+    if (lobby.queue.length === 1) {
       track.startTime = Date.now();
       console.log('⏰ Primeira música da fila, definindo startTime:', track.startTime);
+      console.log('   - Duração da música:', track.duration || 'não definida');
+      
+      // Inicia timer automático no servidor para avançar quando a música terminar
+      scheduleTrackAdvance(lobby.id, track);
     }
-    
-    lobby.queue.push(track);
     console.log('✅ Música adicionada:', track.title);
     console.log('📊 Tamanho da fila agora:', lobby.queue.length);
     
@@ -349,67 +461,27 @@ io.on('connection', (socket: Socket) => {
     console.log('📤 Enviado evento "fila_atualizada" para o lobby:', lobby.id);
   });
   
-  // Evento para quando uma música termina - servidor gerencia o avanço automático
+  // Evento para quando uma música termina - servidor já gerencia automaticamente via timer
+  // Este evento é apenas um fallback caso o timer falhe
   socket.on('musica_terminou', () => {
-    console.log('📤 Recebido evento "musica_terminou" de:', socket.id);
+    console.log('📤 Recebido evento "musica_terminou" de:', socket.id, '(fallback)');
     
     const context = findLobbyAndUser(socket.id);
     
     if (!context) {
-      console.error('❌ Usuário não encontrado em nenhum lobby');
+      console.log('⚠️ Usuário não encontrado no lobby (pode ter desconectado), mas servidor gerencia avanço automaticamente');
       return;
     }
     
     const { lobby } = context;
     
-    // Verifica se já está processando um evento para este lobby (lock)
-    if (lobbyProcessingLocks.get(lobby.id)) {
-      console.log('⚠️ Já está processando avanço de música para este lobby, ignorando evento duplicado');
-      return;
-    }
-    
-    // Se não há músicas na fila, não faz nada
-    if (lobby.queue.length === 0) {
-      console.log('⚠️ Fila vazia, nada para avançar');
-      return;
-    }
-    
-    // Ativa o lock para este lobby
-    lobbyProcessingLocks.set(lobby.id, true);
-    
-    try {
-      // Verifica novamente se há músicas (pode ter sido removida por outro evento)
-      if (lobby.queue.length === 0) {
-        console.log('⚠️ Fila já estava vazia ao processar evento');
-        return;
-      }
-      
-      // Remove a primeira música da fila
-      const trackRemovido = lobby.queue[0];
-      const trackIdRemovido = trackRemovido.id;
-      lobby.queue = lobby.queue.slice(1);
-      console.log('✅ Música terminou e foi removida:', trackRemovido.title, `(ID: ${trackIdRemovido})`);
-      console.log('📊 Tamanho da fila agora:', lobby.queue.length);
-      
-      // Se ainda há músicas na fila, define startTime para a próxima
-      if (lobby.queue.length > 0) {
-        // Sempre atualiza o startTime para garantir sincronização
-        lobby.queue[0].startTime = Date.now();
-        console.log('⏰ Próxima música iniciando com startTime:', lobby.queue[0].startTime);
-        console.log('   - Próxima música:', lobby.queue[0].title);
-      } else {
-        console.log('📭 Fila vazia após remover música');
-      }
-      
-      // Notifica todos no lobby sobre a atualização da fila
-      io.to(lobby.id).emit('fila_atualizada', lobby.queue);
-      console.log('📤 Enviado evento "fila_atualizada" para o lobby:', lobby.id);
-    } finally {
-      // Remove o lock após um pequeno delay para evitar processar eventos muito próximos
-      setTimeout(() => {
-        lobbyProcessingLocks.delete(lobby.id);
-        console.log('🔓 Lock removido para lobby:', lobby.id);
-      }, 1000); // 1 segundo de debounce para garantir que não processe eventos duplicados
+    // Se o servidor já está gerenciando via timer, ignora eventos dos clientes
+    // Mas se não há timer ativo, processa manualmente como fallback
+    if (!lobbyAdvanceTimers.has(lobby.id)) {
+      console.log('⚠️ Nenhum timer ativo, processando avanço manualmente (fallback)');
+      advanceToNextTrack(lobby.id);
+    } else {
+      console.log('✅ Timer do servidor já está gerenciando o avanço, ignorando evento do cliente');
     }
   });
 
@@ -438,9 +510,16 @@ io.on('connection', (socket: Socket) => {
     console.log('📊 Tamanho da fila agora:', lobby.queue.length);
     
     // Se removeu a primeira música e ainda há músicas na fila, adiciona startTime à próxima
-    if (wasFirstTrack && lobby.queue.length > 0 && !lobby.queue[0].startTime) {
+    if (wasFirstTrack && lobby.queue.length > 0) {
       lobby.queue[0].startTime = Date.now();
       console.log('⏰ Nova primeira música, definindo startTime:', lobby.queue[0].startTime);
+      
+      // Cancela timer anterior e agenda novo
+      const existingTimer = lobbyAdvanceTimers.get(lobby.id);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+      }
+      scheduleTrackAdvance(lobby.id, lobby.queue[0]);
     }
     
     io.to(lobby.id).emit('fila_atualizada', lobby.queue);
@@ -457,6 +536,14 @@ io.on('connection', (socket: Socket) => {
       console.log(`👤 Usuário ${user.name} removido do lobby ${lobby.id}`);
       socket.to(lobby.id).emit('usuario_saiu', user);
 
+      // Limpa timer se o lobby ficou vazio
+      const timer = lobbyAdvanceTimers.get(lobby.id);
+      if (timer) {
+        clearTimeout(timer);
+        lobbyAdvanceTimers.delete(lobby.id);
+        console.log('🔄 Timer cancelado - lobby vazio');
+      }
+      
       if (lobby.users.length === 0) {
         delete lobbies[lobby.id];
         console.log(`🗑️ Lobby ${lobby.id} removido por estar vazio.`);
