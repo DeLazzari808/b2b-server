@@ -95,6 +95,9 @@ const io = new Server(server, {
 // Middleware para adicionar header ngrok em todas as respostas
 app.use((req, res, next) => {
   res.setHeader('ngrok-skip-browser-warning', 'true');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
   next();
 });
 
