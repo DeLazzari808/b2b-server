@@ -84,7 +84,7 @@ const io = new Server(server, {
     origin: '*', 
     methods: ['GET', 'POST', 'OPTIONS'],
     credentials: true,
-    allowedHeaders: ['*'],
+    allowedHeaders: ['*', 'ngrok-skip-browser-warning'],
   },
   transports: ['polling', 'websocket'], // Suporta polling e websocket
   allowEIO3: true, // Compatibilidade com versões antigas
@@ -92,9 +92,22 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
+// Middleware para adicionar header ngrok em todas as respostas
+app.use((req, res, next) => {
+  res.setHeader('ngrok-skip-browser-warning', 'true');
+  next();
+});
+
 // --- Rotas HTTP ---
-app.get('/', (req, res) => res.send('Servidor B2B Matchmaking está rodando!'));
+app.get('/', (req, res) => {
+  // Headers para evitar página de warning do ngrok
+  res.setHeader('ngrok-skip-browser-warning', 'true');
+  res.send('Servidor B2B Matchmaking está rodando!');
+});
+
 app.get('/health', (req, res) => {
+  // Headers para evitar página de warning do ngrok
+  res.setHeader('ngrok-skip-browser-warning', 'true');
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
@@ -103,6 +116,8 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/search', async (req, res) => {
+  // Headers para evitar página de warning do ngrok
+  res.setHeader('ngrok-skip-browser-warning', 'true');
   try {
   const query = req.query.q as string;
     const source = (req.query.source as string) || 'youtube'; // youtube, spotify, soundcloud, ou 'all'
